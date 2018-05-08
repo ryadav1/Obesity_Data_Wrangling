@@ -1,1 +1,1 @@
-# Obesity_Data_Wrangling
+Tutorial of data wrangling process to merge census, food access and obesity datasets from 2015. We will attempt to determine whether or not the number of food deserts in 2015 in a state can predict the prevalence of obesity among adults (age 18+) in that state in 2015. 

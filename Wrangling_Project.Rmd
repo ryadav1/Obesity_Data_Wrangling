@@ -1,0 +1,522 @@
+---
+title: "Food Deserts and Obesity"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+By Isaac and Rajnish Yadav
+
+**Introduction to Food Deserts**
+
+For public health professionals -- in particular, public health professionals studying obesity -- the concept of "food deserts" has become increasingly relevant in recent years. As defined by the USDA, "Food deserts are parts of the country vapid of fresh fruit, vegetables, and other healthful whole foods, usually found in impoverished areas. This is largely due to a lack of grocery stores, farmers’ markets, and healthy food providers."
+
+Intuitively, it should make sense why food deserts are relevant to obesity rates: if people in one neighborhood cannot access (or afford) nutritious foods such as fruits and vegetables, they will be forced to turn to processed, unhealthy foods. These foods are more likely to make people obese. 
+
+**Project Outline**
+
+The goals of our project are two-fold. First, we will attempt to determine whether or not the number of food deserts in 2015 in a state can predict the prevalence of obesity among adults (age 18+) in that state in 2015. Second, in doing so, we will provide a tutorial of the data-wrangling process, to show how different raw data sets can be cleaned, organized, and joined. Ultimately, we will attempt to fit a model that predicts statewide obesity prevalence. 
+
+**Load Relevant Packages**
+
+First, we must load all of the relevant packages that we will use. We use the library() command to do so.
+```{r, results = "hide", message=FALSE, warning=FALSE}
+#IMPORT RELEVANT PACKAGES
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(caret)
+library(broom)
+library(car)
+library(leaps)
+library(glmnet)
+library(partykit)
+library(knitr)
+library(ggcorrplot)
+library(DT)
+```
+
+**Load Obesity Data**
+
+We will have three initial raw data sets. First, there will be `ObesityData`, which, among other things contains statewide-level data on various obesity related factors over a number of years (it is available in CSV form on the [CDC's website](https://catalog.data.gov/dataset/nutrition-physical-activity-and-obesity-behavioral-risk-factor-surveillance-system)). We will focus on the year 2015.
+
+```{r, results = "hide", message=FALSE, warning=FALSE}
+ObesityData<-read_csv("~/DataScience/Obesity_Data_Wrangling/ObesityDataGood.csv")
+```
+
+**Variables of Interest**
+
+In the `ObesityData` set, the following are the initial variables of interest that we will examine. However, with a little wrangling, we will also create new, more relevant variables (set forth below). Here are the initial variables of interest:
+
+-`YearStart`=Year
+
+-`Class` = Class of Question
+
+-`LocationAbbr`, `LocationDesc` = State (Postal Code abbreviation and full state name -- saved for ease of joining later on)
+
+-`Question` = Obesity Related Question (i.e. percentage of state residents that are obese)
+
+-`Data_Value` = Value Corresponding to Question (i.e. the exact number that answers the above question)
+
+-`Total` = Statewide totals
+
+Unfortunately, this data is not too useful in its current layout. We'll need to do some wrangling to "condense it down."
+
+
+A snippet of `ObesityData`:
+```{r, echo=FALSE}
+datatable(ObesityData[1:100,],extensions = 'FixedColumns',
+  options = list(dom = 't',scrollX = TRUE, fixedColumns = TRUE))
+```
+
+
+
+So that we can efficiently fit a model later on, we want our `ObesityData` set to have each row as a state, and each column representing the value of some explanatory variable (i.e. percentage of people who consume less than one fruit per day) for each state. 
+
+The data set already has the values we need, but not in the layout we want. So we'll use the `spread()` function to create the following variables, and thereby "untidy" the data set in a manner conducive to modeling. You can read the comments above each command to follow exactly what is going on. 
+
+**Variables To Create**
+
+`Pct_Obese`=Percent of Adults Aged 18+ Who Have an Obese Classification
+
+`Pct_1_Fruit`=Percent of Adults Who Report Consuming Fruit Less Than One Time Daily
+
+`Pct_1_Veggie`=Percent of Adults Who Report Consuming Vegetables Less Than One Time Daily
+
+```{r}
+#WRANGLE OBESITY DATA INTO BASE DATA SET, CALLED `U_ObesityData`
+U_ObesityData<-ObesityData%>%
+  #SELECT VARIABLES RELEVANT TO OBESITY
+  select(YearStart, Class, LocationAbbr, LocationDesc, Question, Data_Value, Total)%>%
+  #TAKE ONLY QUESTIONS REGARDING WIEGHT STATUS OR NUTRITION, SELECT ONLY THE YEAR 2015,
+  #FILTER OUT GUAM AND NATIONWIDE TOTALS, TAKE ONLY THE STATEWIDE VALUE (TOTAL)
+  filter((Class=="Obesity / Weight Status"|Class=="Fruits and Vegetables"),YearStart==2015, LocationAbbr!="US", LocationAbbr!="GU", Total=="Total")%>%
+  #SELECT ONLY LOCATION INDICATORS, QUESTIONS AND DATA VALUES, AND THE TOTAL INDICATOR
+  select(YearStart, LocationAbbr, Question, Data_Value, Total)%>%
+  #SORT BY STATE
+  arrange(LocationAbbr)%>%
+  #MAKE SURE NONE OF THE STATEWIDE VALUES ARE N/A
+  filter(!is.na(Total))%>%
+  #CONVERT QUESTIONS TO COLUMNS, AND MOVE THE VALUES  THAT ANSWER EACH QUESTION INTO THE      DATA FRAME
+  spread(key=Question, value=Data_Value)%>%
+  #NAME THE COLUMNS SOMETHING MORE REASONABLE
+  `colnames<-`(c("Year", "State", "Total", "Pct_Obese", "Pct_1_Fruit", "Pct_1_Veggie"))%>%
+  #RESELECT THE VARIABLES WE'LL USE GOING FORWARD
+  select(Year, State, Pct_Obese, Pct_1_Fruit, Pct_1_Veggie)
+```
+
+
+Here, we have a data set with 52 rows and 5 columns. Each row is a state (all 50 plus D.C. and Puerto Rico), and each column is one of the following variables: year, state, percentage of state residents who were obese in 2015, percentage of state adult residents who reported consuming fruit less than once daily, and percentage of state adult reported consuming vegetables less than one time daily.
+
+A snippet of `U_ObesityData`:
+```{r, echo=FALSE}
+datatable(U_ObesityData)
+```
+
+
+**Food Access Data**
+
+Now, with the obesity data in its base form, let us turn our attention to the [USDA's data](https://www.ers.usda.gov/data-products/food-access-research-atlas/documentation/), which tracks various factors indicative of food desertship. First, we load the data. 
+```{r, results = "hide", message=FALSE, warning=FALSE}
+FoodAccessData<-read_csv("~/DataScience/Obesity_Data_Wrangling/FoodAccessData.csv")
+```
+
+Within this expansive data set, we will want to select the following variables of interest for the year 2015. It is our suspicion that these will be useful predictors of a state's obesity rate -- but we'll have to wait and find out! 
+
+**Variables of Interest**
+
+-`State`=State
+
+-`LATracts1`= Census tracts where a significant number (at least 500 people) or share (at least 33 percent) of the population is greater than 1.0 mile from the nearest supermarket, supercenter, or large grocery store for an urban area or greater than 20 miles for a rural area
+
+-`LATracts10` = Census tracts where a significant number (at least 500 people) or share (at least 33 percent) of the population is greater than 10.0 miles from the nearest supermarket, supercenter, or large grocery store for an urban area or greater than 20 miles for a rural area.
+
+-`LowIncomeTracts` = Census tracts where the tract’s poverty rate is greater than 20 percent; or the tract’s median family income is less than or equal to 80 percent of the State-wide
+median family income; or the tract is in a metropolitan area and has a median family income less than or equal to 80 percent of the metropolitan area's median family income.
+
+-`Rural` = Rural census tract (y/n)
+
+-`Urban` = Urban census tract (y/n)
+
+-`HUNVFlag` = Census tract with low vehicle access
+
+**Food Access Wrangling**
+
+A snippet of `FoodAccessData`:
+```{r, echo=FALSE}
+datatable(FoodAccessData[1:100,],extensions = 'FixedColumns',
+  options = list(dom = 't',scrollX = TRUE, fixedColumns = TRUE))
+```
+
+
+In the above data frame's current structure, all variables are tallied at the county level -- however, we want them at the statewide level, so we can directly compare them to the values in `ObesityData`. So we take the following wrangling steps:
+
+```{r}
+#WRANGLE FOOD ACCESS
+U_FoodAccess<-FoodAccessData%>%
+  #SELECT THE VARIABLES WE'RE INTERESTED IN
+  select(State, LATracts1, LATracts10, LowIncomeTracts, Rural, Urban, HUNVFlag)%>%
+  #INSTEAD OF TAKING TRACT COUNTS AT COUNTY LEVEL, WE WANT THEM AT STATE LEVEL. SO HERE, WE COUNT THE TOTAL NUMBER OF EACH TRACT TYPE WITHIN EACH STATE, AND THEN SUM THEM UP
+  group_by(State)%>%
+  summarise(LATracts1=sum(LATracts1), LATracts10=sum(LATracts10), LITracts=sum(LowIncomeTracts), Rural=sum(Rural), Urban=sum(Urban), HUNVFlag=sum(HUNVFlag))
+
+```
+We create the data frame `U_FoodAccess`, which contains the count of each of the aforementioned variables of interest at the statewide level. As a result, we have 51 rows (1 for every state, plus DC), and 7 variables (`State`, `LATracts1`, `LATracts10`, `LITracts`, `Rural`, `Urban`, and `HUNVFlag`)
+
+Now, we have a total count of each tract-type at the statewide level. Instead of knowing how many low-access, 1 mile tracts there are in each county, we know how many there are in each state.
+
+A snippet of `U_FoodAccessData`:
+```{r, echo=FALSE}
+datatable(U_FoodAccess)
+```
+
+
+**Scaling U_FoodAccess to State Populations**
+
+However, states are different sizes, meaning that 50 low access tracts in one state could be a lot in a small state, while 50 would also be very little in a much bigger state. Thus, we want to scale each variable to population size -- more precisely, we want to scale each tract type to every 10,000 residents. 
+
+**Load State Population Data**
+
+To do this, we'll need each state's population in 2015. And to get the populations of each state for 2015, we load data from the [US Census Bureau](https://www.census.gov/data/datasets/2017/demo/popest/state-total.html)
+```{r, results="hide", message=FALSE, warning=FALSE}
+StatePopulations<-read_csv("~/DataScience/Obesity_Data_Wrangling/CensusData.csv")
+```
+
+The only variables of interest here are state and the state's population in 2015. However, this data set is pretty messy. There are a bunch of irrelevant rows, and dots before each state name. We'll have to clean it up.
+
+A snippet of `StatePopulations`:
+```{r, echo=FALSE}
+datatable(StatePopulations,extensions = 'FixedColumns',
+  options = list(dom = 't',scrollX = TRUE, fixedColumns = TRUE))
+```
+
+
+**Wrangling and Cleaning of State Population Data**
+
+```{r, warning=FALSE}
+#WRANGLE POPULATION DATA
+
+#SELECT THE ROWS THAT CONTAIN EACH STATE'S POPULATION INFORMATION
+U_PopData<-StatePopulations[c(9:59, 61),]
+
+U_PopData<-U_PopData %>%
+  #SELECT COLUMNS 1 AND 9 (STATE AND POPULATION)
+  select(c(1, 9)) %>%
+  #RENAME THEM "STATE" AND "2015POP"
+  `colnames<-`(c("State", "2015Pop"))%>%
+  #GET RID OF THE DOTS AT THE BEGINNING OF EACH STATE
+  separate(State, into = c("oen", "State"), sep="[.]")%>%
+  #SELECT THE COLUMNS WE WANT
+  select(State, `2015Pop`)
+
+#OVERWRITE PUERTO RICO
+U_PopData$State[52]<- "Puerto Rico"
+
+```
+The resulting `U_PopData` is much nicer -- it contains a data frame that has every state (plus DC and Puerto Rico), and the population of that state in 2015. 
+
+A snippet of `U_PopData`:
+```{r, echo=FALSE}
+datatable(U_PopData)
+```
+
+
+**Join State Population Data to `U_FoodAccess`**
+
+Now, so that we can calculate tracts per 10,000 residents, we want to join the `U_PopData` and `U_FoodAccess` data frames. However, there's just one problem: the column we want to join on, the state's name, is in two separate formats. In `U_FoodAccess`, `State` is denoted by postal code. In `U_PopData`, `State` is denoted by full name. Thus, the state columns won't link up when we join, which will be an issue.
+
+However, recall that in the `ObesityData` set, we kept both postal code (`LocationAbbr`) and full state name (`LocationDesc`). We did this for a reason. If we select just these two columns, join them to `U_FoodAccess`, we will then have full state names in our `U_FoodAccess` data frame as well. This will enable us to join `U_FoodAccess` to `U_PopData`, and ensure that a state's population value goes to the same row as the food access values. 
+
+```{r}
+#LINK STATE NAMES AND ABBREVIATIONS IN FOOD ACCESS FOR EASE OF JOINS
+StateNames<-ObesityData%>%
+  #GROUP BY FULL NAME AND POSTAL CODE
+  group_by(LocationDesc, LocationAbbr)%>%
+  #FOLD DOWN SO THAT FOR EACH POSTAL CODE, THERE IS ONE CORRESPONDING STATE NAME. THE NUMBER COLUMN IS TRIVIAL, IT'S JUST TO GET RID OF THE REPEAT STATE NAMES AND POSTAL CODES. IT ENSURES THAT THERE ARE 52 ROWS (ONE FOR EACH STATE), AND NOT, AS THERE WERE PREVIOUSLY 53,392. 
+  summarise(number=n())%>%
+  #FILTER OUT VIRGIN ISLANDS, GUAM, AND NATIONAL
+  filter(LocationDesc!="Virgin Islands", LocationDesc!="Guam", LocationDesc!="National")%>%
+  #SELECT POSTAL CODE AND FULL NAME; WE HAVE OUR NEW DATA FRAME
+  select(LocationDesc,LocationAbbr)
+
+#ADD THE FULL STATE NAMES INFO TO THE FOOD ACCESS DATA SET
+U_FoodAccess<-left_join(StateNames, U_FoodAccess, by =c("LocationAbbr"="State"))
+```
+
+Now, `U_FoodAccess` lists both the state's postal code and the state's full name. We can join it to `U_PopData`, and scale the variables of interest per 10,000 residents, and calculate tract frequencies. 
+
+**Join Population to Food Access Data for Population Rates**
+
+```{r}
+#JOIN FOOD ACCESS TO POPULATION DATA BY STATE NAME
+U_FOODAccess_Pop<-left_join(U_FoodAccess, U_PopData, by = c("LocationDesc"="State"))%>%
+  #SCALE EACH STATE'S TRACT COUNT TO 10,000 RESIDENTS VIA MUTATE FUNCTION
+  mutate(LATracts1_Per10k=10000*LATracts1/`2015Pop`, LATracts10_Per10k=10000*LATracts10/`2015Pop`,LITracts_Per10k=10000*LITracts/`2015Pop`, Low_Veh_Access_Per10k=10000*HUNVFlag/`2015Pop`, Pct_Rural_Tracts=Rural/(Rural+Urban))
+```
+Now, we have the same food access data as before; however, our variables of interest (the totals of different kinds of tracts) have been scaled to state population. 
+
+A snippet of `U_FOODAccess_Pop`:
+```{r, echo=FALSE}
+datatable(U_FOODAccess_Pop,extensions = 'FixedColumns',
+  options = list(dom = 't',scrollX = TRUE, fixedColumns = TRUE))
+```
+
+This data frame can now be joined to the obesity data, on the column that contains a state's postal code. 
+
+**Join Scaled Food Access to Obesity Data**
+
+```{r}
+#JOIN OBESITY DATA TO FOOD ACCESS AND POPULATION DATA FOR FULL DATA SET
+#JOIN ON POSTAL CODE OF STATE
+FULL_DATA<-left_join(U_FOODAccess_Pop, U_ObesityData, by = c("LocationAbbr"="State"))%>%
+  #OMIT ANY OUTSTANDING NA'S
+  na.omit()%>%
+  #UNGROUP BY STATE FOR EASE OF MODELING
+  ungroup()
+```
+Here, we have our base data set. However, for modeling purposes later on, some of these columns/variables -- such as the unscaled, raw tract counts -- will be less useful for modeling. So we'll also make a new data frame, entitled `Model_Data`, that will provide just the columns we need for modeling. We'll store it for later. 
+```{r}
+Model_Data<-FULL_DATA%>%
+  select(Pct_Obese, LATracts1_Per10k, LATracts10_Per10k, LITracts_Per10k, Low_Veh_Access_Per10k, Pct_1_Fruit, Pct_1_Veggie, Pct_Rural_Tracts)
+```
+
+```{r, include=FALSE}
+Model_Data_Show<-FULL_DATA%>%
+  select(LocationDesc, Pct_Obese, LATracts1_Per10k, LATracts10_Per10k, LITracts_Per10k, Low_Veh_Access_Per10k, Pct_1_Fruit, Pct_1_Veggie, Pct_Rural_Tracts)
+```
+
+Our data is fully wrangled, and ready for model-fitting. Wrangling can be tricky business though, so in case you've gotten lost somewhere, here's an overview of the variables in `Model_Data` that we will use. Remember, this is all for the year 2015, and each row represents a US state in 2015.
+
+-`LocationDesc`= U.S. State
+
+-`Pct_Obese`= Percentage of adults (18+) in state classified as obese
+
+-`LATracts1_Per10k`= Number of "low access census tracts" in state that are 1 or more miles from nearest grocery store, per 10,000 residents
+
+-`LATracts10_Per10k`= Number of "low access census tracts" in state that are 10 or more miles from nearest grocery store, per 10,000 residents
+
+-`LITracts_Per10k` = Number of "low-income census tracts" in state, per 10,000 residents
+
+-`Low_Veh_Access_Per10k` = (formerly HUNVFlag) Number of census tracts in state with "low vehicle access", per 10,000 residents
+
+-`Pct_1_Fruit` = Percentage of adults in state who reported consuming fruit less than once daily
+
+-`Pct_1_Veggie` = Percentage of adults in state who reported consuming vegetables less than once daily
+
+-`Pct_Rural_Tracts)` = Percentage of census tracts in state deemed "rural"
+
+
+
+A snippet of `Model_Data` (with states included):
+```{r, echo=FALSE}
+datatable(Model_Data_Show,extensions = 'FixedColumns',
+  options = list(dom = 't',scrollX = TRUE, fixedColumns = TRUE))
+```
+
+**Plotting the Data**
+
+Before actually fitting models, we want to get a basic sense of the relationships between some of our explanatory variables and `Pct_Obese`. So we build a correlogram, as well as a few scatterplots. 
+
+```{r, height = 6, width = 8}
+#Correlogram
+
+#Correlation Matrix
+corr <- round(cor(Model_Data), 1)
+
+#Plot
+ggcorrplot(corr, hc.order = TRUE,
+           type = "lower",
+           lab = TRUE,
+           lab_size = 3,
+           colors = c("tomato1", "white", "springgreen3"), 
+           title="Correlogram", 
+           ggtheme=theme_bw)
+```
+
+```{r, echo=FALSE}
+
+ggplot(Model_Data, aes(LATracts1_Per10k, Pct_Obese)) +
+  geom_point(col = "magenta2") +
+  geom_smooth(method = "lm", col = "orange2", se = FALSE) +
+  annotate("text", x=2.0, y=37.75, label= "correlation = -0.1", size = 6.5, col = "royalblue3") +
+  labs(subtitle="No. of Low Access Census Tracts 1 or More Miles Away per 10,000 Residents Vs Obesity Percentage", 
+       y="State obesity percentage", 
+       x="Low access track 1 or more miles away, per 10k people", 
+       title="Scatterplot")
+
+
+ggplot(Model_Data, aes(LITracts_Per10k, Pct_Obese)) +
+  geom_point(col = "magenta2") +
+  geom_smooth(method = "lm", col = "orange2", se = FALSE) +
+  annotate("text", x=1.5, y=37.0, label= "correlation = -0.6", size = 6.5, col = "royalblue3") +
+  labs(subtitle="No. of Low-Income Census Tracts in State, per 10,000 Residents Vs Obesity Percentage", 
+       y="State obesity percentage", 
+       x="Low income census tracts in state per 10k", 
+       title="Scatterplot")
+
+
+ggplot(Model_Data, aes(Pct_Rural_Tracts, Pct_Obese)) +
+  geom_point(col = "magenta2") +
+  geom_smooth(method = "lm", col = "orange2", se = FALSE) +
+  annotate("text", x=0.6, y=37.75, label= "correlation = -0.1", size = 6.5, col = "royalblue3") +
+  labs(subtitle="Percentage of Rural Census Tracts in State Vs Obesity Percentage", 
+       y="State obesity percentage", 
+       x="Percentage of census tracts in 'rural' state", 
+       title="Scatterplot")
+
+
+#correlation
+ggplot(Model_Data, aes(Pct_1_Veggie, Pct_Obese)) +
+  geom_point(col = "magenta2") +
+  geom_smooth(method = "lm", col = "orange2", se = FALSE) +
+  annotate("text", x=48, y=37.75, label= "correlation = -0.5", size = 6.5, col = "royalblue3") +
+  labs(subtitle="% of Adults in State Who Reported Consuming Vegetables Less Than Once Daily Vs Obesity Percentage", 
+       y="State obesity percentage", 
+       x="Percentage of adults in state consuming vegetables < 1 daily", 
+       title="Scatterplot")
+
+
+```
+
+As we see in the plots (again, their goal is just to give us some basic intuition for the explanatory variables), there is surprisingly little association between `LA_Tracts1_Per10k` and `Pct_Obese` and little association between `Pct_Rural_Tracts` and `Pct_Obese`. In other words, neither the number of census tracts 1 mile or more from the nearest grocery store (per 10,000 residents) nor the setting of many of a state's tracts explain much variation in a state's obesity percentage. However, if we look at `Pct_1_Veggie` and `Pct_Obese`, we see a moderately strong negative linear association. This is surprising -- one would think that as the percentage of people who consumed less than one serving of veggies increased, so would obesity percentages. But clearly, this is not the case.
+
+Moreover, if we plot `LITracts_Per10k` against `Pct_Obese`, we see another moderately strong negative linear association. The plot shows that as the frequency of low income tracts increases in a state, the percentage of adults with obesity decreases. Again, this is somewhat counter-intuitive: conventional wisdom would have us expect obesity to increase as the frequency of low-income tracts increases, since fresh/healthier food tends to be much more expensive. But that doesn't seem to be the case here, oddly enough.
+
+**Modeling**
+
+Now that we have a better sense of our fully-wrangled data, we can begin the modeling process. More precisely, using `Model_Data`, we will attempt to predict `Pct_Obese` from some combination of `LATracts1_Per10k`,`LATracts10_Per10k`,`LITracts_Per10k`,`Low_Veh_Acces_Per10k`,`Pct_1_Fruit`,`Pct_1_Veggie`, and `Pct_Rural_Tracts`. 
+
+**Check VIFs/Multicollinearity**
+
+However, before we actually fit any models, we should do the responsible thing and check for multicollinearity. We'll do a quick test of VIFs, to make sure our explanatory variables aren't linear combinations of one another. 
+
+```{r}
+#CREATE LINEAR MODEL WITH ALL EXPLANATORY VARIABLES AND NO INTERACTION TERMS
+mod.single<-lm(Pct_Obese~Pct_1_Veggie+Pct_1_Fruit+LITracts_Per10k+LATracts1_Per10k+LATracts10_Per10k+Low_Veh_Access_Per10k, data = FULL_DATA)
+glance(mod.single)
+
+#CALCULATE VIF OF EACH EXPLANATORY VARIABLE
+vif(mod.single)
+```
+As the `Vif()` function shows us, all of our explanatory variables have Variance Inflation Factors less than 5. The VIF of Pct_1_Veggie is 3.4, which means that the variance of the estimated coefficients is 3.4 times higher because of correlation between the independent variables. If the VIFs are in between 1 and 5, we consider the variables used in the regression analysis are "moderately correlated". So in terms of multicollinearity, we're good to proceed with model building!
+
+**Fitting MLR Models**
+
+Initially, we'll use four modeling techniques -- to wit, K-Folds CV Linear, K-Folds CV with a Lasso, a regression tree, and an AIC stepwise selection (two of them, actually). We'll use fold number = 10 (a common choice), and repeat thrice.
+
+
+**K Folds CV**
+```{r, results = "hide"}
+#Traditional K-Folds with MLR. No penalty for too many terms.
+set.seed(432)
+cv_opts <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+mod_kfolds <- train(Pct_Obese~.^2, data = Model_Data, method = "lm",
+ trControl = cv_opts)
+
+
+
+```
+
+**GLMnet**
+```{r, results="hide"}
+#GLMnet method
+set.seed(432)
+cv_opts <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+lam <- c(30:60/100)
+alpha <- c(0, 0.5, 1) 
+grd <- expand.grid(lambda = lam, alpha = alpha)
+
+mod_enet <- train(Pct_Obese~.^2, data = Model_Data, method = "glmnet",tuneGrid = grd,
+ trControl = cv_opts, standardize=TRUE)
+mod_enet
+
+```
+
+**Regression Tree**
+```{r, results="hide"}
+#Regression tree
+set.seed(432)
+cv_opts <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+grd <- data.frame(.cp = (0:36) * 0.005)
+mod_tree <- train(Pct_Obese ~ ., data = Model_Data, method = "rpart", tuneGrid = grd,
+ trControl = cv_opts)
+
+
+```
+
+
+**Stepwise AICs**
+
+We will actually fit two stepwise models: one that allows for interaction terms, and one that doesn't. 
+```{r, results = "hide"}
+library(MASS)
+set.seed(432)
+mod_step <- train(Pct_Obese ~ ., data = Model_Data, method = "glmStepAIC",
+ trControl = cv_opts)
+#allow interaction term, for kicks and giggles
+mod_step_int <- train(Pct_Obese ~ .^2, data = Model_Data, method = "glmStepAIC",
+ trControl = cv_opts)
+```
+
+**Model Comparison**
+
+Now that we've fit our five models, we can compare them. Let's take a look at the RMSE's of each respective model:
+```{r, echo=FALSE}
+Model <- c("Regular LM", "Enet Model", "Regression Tree Model", "Stepwise Model, No Interaction", "Stepwise Model w/ Interaction")
+RMSE <- c(1.806841, 1.156288, 1.101835, 1.319408, 1.870322)
+df = data.frame(Model, RMSE)
+```
+
+A snippet of the RMSE's for each model:
+```{r, echo=FALSE}
+datatable(df)
+```
+
+And for some more model comparison...
+
+```{r, echo=FALSE}
+# Store results
+results <- resamples(list(model_kfolds = mod_kfolds, model_enet = mod_enet, model_tree = mod_tree, model_step=mod_step, model_step_with_int=mod_step_int))$values %>%
+  dplyr::select(contains("RMSE")) %>%
+  gather(key = "Model", value = "RMSE")
+results$Model[results$Model=="model_kfolds~RMSE"] <- "Regular GLM Model"
+results$Model[results$Model=="model_enet~RMSE"] <- "GLMnet Model"
+results$Model[results$Model=="model_tree~RMSE"] <- "Regression Tree"
+results$Model[results$Model=="model_step~RMSE"] <- "Stepwise Model, No Interaction Terms"
+results$Model[results$Model=="model_step_with_int~RMSE"] <- "Stepwise Model, w/ Interaction Terms"
+
+# Plot results
+ggplot(results, aes(x = Model, y = RMSE, col = Model)) +
+geom_violin() + geom_point(alpha = 0.6) + 
+theme(legend.position = "none") +
+theme(axis.text.x = element_text( hjust = 1)) +
+labs(title="Violin plot", 
+       subtitle="RMSE vs Model",
+       x="Model",
+       y="Root Mean Square Error")+coord_flip()
+```
+
+**Winner: Regression Tree**
+
+Looking strictly at RMSE, it appears as though our regression tree was the best model. The RMSE indicates the absolute fit of the model to the data -– that is, how close the observed data points are to the model's predicted values. The regression tree had the lowest RMSE of all four models, with RMSE $= 1.102$. The violin plot confirms that the regression tree is the better prediction model for this data set as the RMSE values, in general, are closer to 0, compared to the other models like the logistic stepwise regression (where the RMSE values range from 0 to 5) In short, the regression tree was best.
+
+Here's what the regression tree looks like; it's surprisingly simple. 
+
+```{r}
+set.seed(432)
+mod_t<-rpart(Pct_Obese~., data = Model_Data, control=rpart.control(cp = mod_tree$bestTune))
+plot(as.party(mod_t), gp = gpar(fontsize=8))
+```
+
+The tree's first split was on low income tract frequency: states with .965 or more low income tracts per 10,000 people posted a median obesity percentage just shy of 35. However, if a state had less than .965 low income tracts per 10,000, then the tree split on the percentage of people who reported consuming less than one serving of fruit per day. States with a `Pct_1_Fruit` value between 25.2 and 30.05 had the highest median obesity percentage (just under 37%), while states with a `Pct_1_Fruit` value less than 25.2% or greater than 30.05% posted a median obesity percentage around 35.5%. However, while these medians were the same, the quartiles of the box and whisker plot indicate that the states with `Pct_1_Fruit` less than 25.2% had generally higher obesity rates than those in the >30.05% range. This makes a little more sense -- fruit is fairly healthy, so consuming it more should reduce the likelihood of obesity. 
+
+Also, it's worth noting that our regression tree model had a $R^2$ of $48\%$ -- that is, it was able to explain roughly 48 percent of the variation in `Pct_Obese`. And while this $R^2=48\%$ might seem thoroughly mediocre, it actually makes a good deal of sense when we think about the bigger picture of obesity. Specifically, there are several other factors in addition to diet that are understood to be associated with obesity. For instance, exercise, general health, disability status might be correlated with obesity. A number of common medications are also associated with increased weight gain. 
+
+Our regression tree model contained only dietary, socioeconomic, and geographic information; it did not contain many of the additional factors listed above. Thus, because these other factors were omitted, we shouldn't have expected our model to perfectly predict obesity. We only gave the model part of the story, so it only explained part of the variation of obesity.
+
+**Closing Thoughts**
+
+In all, the underwhelming predictive accuracy of our best model is not the most important thing here. Rather, it's the example of the data analysis workflow used to get to the model. We took three raw, often ugly CSV files downloaded from the internet, and cleaned, restructured, and wrangled them. Then we joined the data sets into one big data set, plotted some variables, and fit a few models (albeit lousy ones). In doing so, we hope you learned a thing or two about the data workflow -- in particular wrangling!.  
